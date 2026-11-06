@@ -1,0 +1,2 @@
+# Gli script girano sul Pi (Linux): sempre a capo LF, anche se modificati da Windows
+* text=auto eol=lf

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# ps finto per test/test.sh: "ps -o etimes= -p <pid>" legge i secondi da $SCENA/eta-<pid>
+pid=${4:-}
+[ -f "$SCENA/eta-$pid" ] || exit 1
+cat "$SCENA/eta-$pid"
