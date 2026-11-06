@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# docker finto per test/test.sh: risponde leggendo la scena in $SCENA e annota gli interventi
+# in $SCENA/chiamate. Per ogni app (nome della cartella) $SCENA/<app>/ contiene:
+#   servizi      i servizi del compose, uno per riga
+#   contenitori  id|servizio|oneoff|stato|salute|politica|uscita|/nome
+#   cartella     dove sta il compose (per "compose ls")
+#   config-rotto, up-rotto   se ci sono, quei comandi falliscono
+app=$(basename "$PWD")
+case $1 in
+    info)
+        [ -e "$SCENA/docker-giu" ] && exit 1
+        exit 0 ;;
+    inspect)
+        shift
+        [ "$1" = --format ] && shift 2
+        for id in "$@"; do
+            grep -h "^$id|" "$SCENA"/*/contenitori | cut -d'|' -f2-
+        done ;;
+    restart)
+        echo "restart $2" >> "$SCENA/chiamate"
+        echo "$2" ;;
+    compose)
+        shift
+        case $1 in
+            config)
+                [ -e "$SCENA/$app/config-rotto" ] && { echo "manca DB_PASSWD nel .env" >&2; exit 15; }
+                cat "$SCENA/$app/servizi" ;;
+            ps)
+                cut -d'|' -f1 "$SCENA/$app/contenitori" ;;
+            up)
+                echo "up $app" >> "$SCENA/chiamate"
+                [ -e "$SCENA/$app/up-rotto" ] && { echo "Error: port is already allocated"; exit 1; }
+                echo " Container $app-1  Started" ;;
+            ls)
+                echo "NAME                STATUS              CONFIG FILES"
+                for d in "$SCENA"/*/; do
+                    [ -f "$d/cartella" ] && echo "$(basename "$d")   exited(1), running(1)   $(cat "$d/cartella")/docker-compose.yml"
+                done
+                [ -f "$SCENA/progetti-extra" ] && cat "$SCENA/progetti-extra"
+                exit 0 ;;
+        esac ;;
+    *)
+        echo "docker finto: comando non previsto: $*" >&2
+        exit 99 ;;
+esac

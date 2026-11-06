@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# pgrep finto per test/test.sh: i pid "in corso" sono in $SCENA/pgrep, uno per riga
+[ -f "$SCENA/pgrep" ] || exit 1
+cat "$SCENA/pgrep"
