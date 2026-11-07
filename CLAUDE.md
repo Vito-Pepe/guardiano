@@ -27,6 +27,7 @@ https://raw.githubusercontent.com/Vito-Pepe/sillabe/main/INFRASTRUTTURA-PI.md
 
 - Lo script gira sull'host come utente `pepe`, **senza `sudo`**, dal cron.
 - La **pagina di stato** (`web/`, container `guardiano-web-1`, `127.0.0.1:8093`, `https://guardiano.<tailnet>.ts.net` dalla repo `ingressi-https`) **non ha accesso a Docker**: legge in sola lettura la fotografia che `guardiano.sh pagina` scrive ogni minuto in `/dev/shm/guardiano`, e i suoi pulsanti (Riavvia, Ferma, Avvia) lasciano richieste in `/dev/shm/guardiano-richieste`, che `guardiano.sh pagina` ricontrolla ed esegue. Formato della fotografia: in testa a `web/foto.js`. `update.sh` fa `git pull` e ricostruisce la pagina.
+- **`/dev/shm` si svuota quando `pepe` esce dal Pi** (systemd-logind, `RemoveIPC=yes` di Debian, all'uscita dall'ultima sessione SSH). `guardiano.sh pagina` ricrea le cartelle ogni minuto e, con `controlla_cartelle_pagina`, riavvia il container se vede ancora quelle vecchie (inode diversi). Un bind mount di una cartella cancellata e rifatta resta legato a quella vecchia: vale per qualsiasi cosa nuova messa in `/dev/shm`.
 - Dati fuori da git nella sua cartella: `dati/` (problemi già segnalati, interventi recenti, azioni della pagina, ultimo giro), `pausa/` (una riga `mano` per la pausa a mano, `pagina<TAB><container>` per ogni container fermato dalla pagina), `guardiano.log`.
 
 ## Vincoli tecnici (non romperli)

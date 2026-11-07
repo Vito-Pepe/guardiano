@@ -459,6 +459,31 @@ chiamate "restart logoapp-logoapp-1"
 esito "$id" fatto
 prove=$((prove + 1)); [ "$(cat "$GUARDIANO_FOTO/attuale")" != "$prima" ] || ko "dopo l'azione doveva rifare la fotografia"
 
+prova "«pagina»: se il container vede le stesse cartelle del Pi, non lo tocca"
+scena_pulsanti; touch "$SCENA/pagina-accesa"
+GUARDIANO_DURATA_PAGINA=0 bash "$GUARDIANO" pagina > /dev/null 2>&1
+chiamate ""
+registro_righe 0
+prova "  ...se vede cartelle vecchie (cancellate e rifatte dopo un'uscita dal Pi), lo riavvia"
+printf '11\n22\n' > "$SCENA/inode-dentro"
+GUARDIANO_DURATA_PAGINA=0 bash "$GUARDIANO" pagina > /dev/null 2>&1
+chiamate "restart guardiano-web-1"
+registro_contiene "guardiano: la pagina vedeva cartelle vecchie di /dev/shm (rifatte dopo un'uscita dal Pi) → docker restart guardiano-web-1: fatto"
+prova "  ...al massimo 3 volte in un'ora, poi lo scrive una volta sola"
+GUARDIANO_DURATA_PAGINA=0 bash "$GUARDIANO" pagina > /dev/null 2>&1
+GUARDIANO_DURATA_PAGINA=0 bash "$GUARDIANO" pagina > /dev/null 2>&1
+GUARDIANO_DURATA_PAGINA=0 bash "$GUARDIANO" pagina > /dev/null 2>&1
+GUARDIANO_DURATA_PAGINA=0 bash "$GUARDIANO" pagina > /dev/null 2>&1
+chiamate "restart guardiano-web-1
+restart guardiano-web-1
+restart guardiano-web-1"
+registro_contiene "vede ancora cartelle vecchie di /dev/shm, ma l'ho già riavviato 3 volte nell'ultima ora"
+registro_righe 4
+prova "  ...e se la pagina è spenta non c'è niente da controllare"
+scena_pulsanti; printf '11\n22\n' > "$SCENA/inode-dentro"
+GUARDIANO_DURATA_PAGINA=0 bash "$GUARDIANO" pagina > /dev/null 2>&1
+chiamate ""
+
 prova "registro oltre 1 MB: diventa guardiano.log.1"
 nuova_scena; tutto_acceso
 head -c 1100000 /dev/zero | tr '\0' 'x' > "$REGISTRO"
