@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "guardiano",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["test/anteprima.js"],
+      "port": 8093
+    }
+  ]
+}

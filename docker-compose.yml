@@ -1,0 +1,42 @@
+services:
+  # Pagina di stato: https://guardiano.<tailnet>.ts.net (dispositivo "guardiano" della repo
+  # ingressi-https), solo tailnet. Legge in sola lettura la fotografia che "guardiano.sh pagina"
+  # scrive ogni minuto in /dev/shm/guardiano. Il container NON ha accesso a Docker: i pulsanti
+  # (Riavvia, Ferma, Avvia) lasciano una richiesta in /dev/shm/guardiano-richieste, e il guardiano,
+  # sul Pi, la ricontrolla e la esegue.
+  web:
+    build: .
+    ports:
+      # Solo sul Pi: ci arriva l'ingresso HTTPS. Niente LAN, mai Internet.
+      # 8080-8092 sono già usate da altre app sul Pi.
+      - "127.0.0.1:8093:3000"
+    volumes:
+      - type: bind
+        source: /dev/shm/guardiano
+        target: /foto
+        read_only: true
+        bind:
+          # Dopo un riavvio del Pi la cartella (in memoria) non c'è finché la fotografia non la
+          # ricrea: senza questo Docker la creerebbe di root e la fotografia non potrebbe scriverci.
+          # Il container intanto non parte, e il giro del guardiano lo accende dopo pochi minuti.
+          create_host_path: false
+      # L'unica cartella in cui il container scrive: le richieste dei pulsanti
+      - type: bind
+        source: /dev/shm/guardiano-richieste
+        target: /richieste
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 50
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/salute"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped

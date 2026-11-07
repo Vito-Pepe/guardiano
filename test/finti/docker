@@ -12,12 +12,30 @@ case $1 in
         exit 0 ;;
     inspect)
         shift
-        [ "$1" = --format ] && shift 2
+        formato=""
+        [ "$1" = --format ] && { formato=$2; shift 2; }
         for id in "$@"; do
-            grep -h "^$id|" "$SCENA"/*/contenitori | cut -d'|' -f2-
+            riga=$(grep -h "^$id|" "$SCENA"/*/contenitori)
+            if [[ $formato == *"json .State"* ]]; then
+                # Formato della fotografia: nome|servizio|oneoff|politica|immagine|riavvii|.State in JSON
+                IFS='|' read -r _ servizio oneoff stato salute politica uscita nome <<< "$riga"
+                salute_json=""
+                [ "$salute" != - ] && salute_json=',"Health":{"Status":"'$salute'","FailingStreak":0,"Log":[{"Start":"2026-11-07T10:00:00Z","End":"2026-11-07T10:00:01Z","ExitCode":1,"Output":"wget: can'"'"'t connect | prova\n"}]}'
+                echo "$nome|$servizio|$oneoff|$politica|immagine/$servizio:1|2|{\"Status\":\"$stato\",\"Running\":true,\"ExitCode\":$uscita,\"Error\":\"\",\"StartedAt\":\"2026-11-07T09:00:00.123456789Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\"$salute_json}"
+            else
+                echo "$riga" | cut -d'|' -f2-
+            fi
         done ;;
+    logs)
+        nome=${!#}
+        echo "2026-11-07T10:00:00.000000000Z primo messaggio di $nome"
+        printf '2026-11-07T10:00:01.000000000Z \033[31mrosso\033[0m <b>non html</b>\n' ;;
     restart)
         echo "restart $2" >> "$SCENA/chiamate"
+        echo "$2" ;;
+    stop)
+        echo "stop $2" >> "$SCENA/chiamate"
+        [ -e "$SCENA/stop-rotto" ] && { echo "Error response from daemon: cannot stop container"; exit 1; }
         echo "$2" ;;
     compose)
         shift
@@ -28,7 +46,9 @@ case $1 in
             ps)
                 cut -d'|' -f1 "$SCENA/$app/contenitori" ;;
             up)
-                echo "up $app" >> "$SCENA/chiamate"
+                shift
+                [ "${1:-}" = -d ] && shift
+                echo "up $app${1:+ $1}" >> "$SCENA/chiamate"
                 [ -e "$SCENA/$app/up-rotto" ] && { echo "Error: port is already allocated"; exit 1; }
                 echo " Container $app-1  Started" ;;
             ls)
