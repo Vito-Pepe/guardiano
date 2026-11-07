@@ -361,6 +361,16 @@ h2 { font-size: 1.05rem; margin: 32px 0 12px; color: var(--testo-2); font-weight
 .esito-azione-fatto { color: var(--ok); }
 .esito-azione-fallito, .esito-azione-rifiutata, .esito-azione-scaduta { color: var(--errore); }
 
+.nota-log {
+  margin: 0;
+  padding: 8px 16px;
+  border-top: 1px solid var(--bordo);
+  background: var(--superficie-2);
+  color: var(--testo-2);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
 .log {
   margin: 0;
   max-height: 60vh;

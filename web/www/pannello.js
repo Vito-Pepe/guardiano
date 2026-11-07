@@ -59,6 +59,8 @@
       dueCifre(d.getHours()) + ':' + dueCifre(d.getMinutes()) + ':' + dueCifre(d.getSeconds());
   }
 
+  function oraMinuti(d) { return dueCifre(d.getHours()) + ':' + dueCifre(d.getMinutes()); }
+
   function etaFotografia() {
     return stato && stato.pronto ? (Date.now() - stato.ora) / 1000 : null;
   }
@@ -237,7 +239,22 @@
     dl.append(d);
   }
 
-  function disegnaLog(pre, testo) {
+  // Sopra il log: da dove viene, quando è stato letto e, se è corto, che non c'è altro
+  function notaLog(nome, testo, ora) {
+    var righe = testo.trim() ? testo.replace(/\n$/, '').split('\n').length : 0;
+    var t = 'È il log del container, lo stesso di «docker logs --tail 200 ' + nome + '»' +
+      (ora ? ', letto alle ' + oraMinuti(new Date(ora)) : '') + '.';
+    if (!righe) t += ' Il container non ha scritto niente.';
+    else if (righe < 200 && testo.length < 190000) t += ' ' + (righe === 1 ? 'È l’unica riga' : 'Sono tutte le ' + righe + ' righe') + ' che ha scritto: non c’è altro.';
+    else t += ' Sono le ultime 200 righe.';
+    return t;
+  }
+
+  function disegnaLog(pre, testo, ora) {
+    if (pre.nota) {
+      pre.nota.textContent = notaLog(pre.dataset.nome, testo, ora);
+      pre.nota.hidden = false;
+    }
     var inFondo = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
     var vecchioScroll = pre.scrollTop;
     pre.textContent = '';
@@ -266,8 +283,9 @@
         return r.text();
       })
       .then(function (t) {
-        logAperti.set(nome, { testo: t, ora: stato && stato.ora });
-        if (pre.isConnected) disegnaLog(pre, t);
+        var ora = stato && stato.ora;
+        logAperti.set(nome, { testo: t, ora: ora });
+        if (pre.isConnected) disegnaLog(pre, t, ora);
       })
       .catch(function (e) {
         if (pre.isConnected) pre.textContent = 'Non riesco a leggere il log: ' + e.message;
@@ -447,9 +465,14 @@
     aggiorna.hidden = true;
     barra.append(bottone, aggiorna, el('span', 'nota', 'Ultime 200 righe, rilette ogni minuto'));
     li.append(barra);
+    var nota = el('p', 'nota-log');
+    nota.hidden = true;
+    li.append(nota);
     var pre = el('pre', 'log');
     pre.hidden = true;
     pre.tabIndex = 0;
+    pre.dataset.nome = c.nome;
+    pre.nota = nota;
     li.append(pre);
 
     function apri(daCache) {
@@ -459,7 +482,7 @@
       pre.hidden = false;
       var salvato = logAperti.get(c.nome);
       if (daCache && salvato) {
-        disegnaLog(pre, salvato.testo);
+        disegnaLog(pre, salvato.testo, salvato.ora);
         if (salvato.ora !== stato.ora) caricaLog(c.nome, pre);
       } else {
         pre.dataset.nuovo = '1';
@@ -474,6 +497,7 @@
       } else {
         logAperti.delete(c.nome);
         pre.hidden = true;
+        nota.hidden = true;
         aggiorna.hidden = true;
         bottone.textContent = 'Mostra log';
         bottone.setAttribute('aria-expanded', 'false');
