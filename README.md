@@ -81,6 +81,8 @@ La prima tiene il guardiano aggiornato a `main` e ricostruisce la pagina quando 
 
 La pagina gira sulla porta `127.0.0.1:8093` e ci arriva l'ingresso HTTPS `guardiano` della repo `ingressi-https`. Dopo un riavvio del Pi le cartelle in `/dev/shm` non ci sono finché `guardiano.sh pagina` non le ricrea (entro un minuto): intanto il container non parte, e lo accende il giro successivo del guardiano.
 
+Le stesse cartelle spariscono anche **quando esci dal Pi** (l'ultima sessione SSH di `pepe` si chiude): systemd-logind, con l'impostazione predefinita di Debian `RemoveIPC=yes`, cancella i file di `pepe` in `/dev/shm`. `guardiano.sh pagina` le ricrea al minuto dopo, ma il container resterebbe collegato a quelle vecchie («Nessuna fotografia», pulsanti senza risposta): per questo ogni minuto confronta le cartelle del Pi con quelle che vede il container (gli inode) e, se sono diverse, lo riavvia (al massimo 3 volte in un'ora). Nel registro compare «la pagina vedeva cartelle vecchie di /dev/shm».
+
 ## Un'app nuova sul Pi
 
 Aggiungi la sua cartella ad [`app.conf`](app.conf) con una PR. Perché il guardiano si accorga anche di quando è bloccata (non solo spenta), dalle un `healthcheck` nel suo `docker-compose.yml`, come LogoApp e Impasti:

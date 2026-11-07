@@ -56,6 +56,7 @@ SCADENZA_RICHIESTA=120        # s: una richiesta più vecchia non si esegue più
 DURATA_PAGINA=${GUARDIANO_DURATA_PAGINA:-55}   # s di ascolto di "pagina": il cron la rilancia ogni minuto
 # Servono alla pagina stessa: da lì non si possono fermare (resterebbe chiusa fuori)
 PROTETTI="guardiano-web-1 ingressi-https-guardiano-1"
+CONTENITORE_PAGINA=guardiano-web-1   # il container della pagina: vede FOTO in /foto e RICHIESTE in /richieste
 PROVA=0
 
 # Una riga per container: servizio|oneoff|stato|salute|politica di riavvio|codice di uscita|nome
@@ -501,6 +502,27 @@ esegui_richieste() {
 
 # Dal cron ogni minuto: una fotografia, poi in ascolto dei pulsanti per DURATA_PAGINA secondi.
 # Dopo un'azione, una fotografia nuova, così la pagina mostra subito com'è andata.
+# Il container della pagina vede FOTO e RICHIESTE com'erano quando è partito: se nel frattempo
+# sono state cancellate e rifatte, guarda cartelle che non ci sono più (la pagina dice «Nessuna
+# fotografia» e i pulsanti non arrivano). Succede quando pepe esce dall'ultima sessione SSH:
+# systemd-logind (RemoveIPC, predefinito in Debian) cancella i suoi file in /dev/shm, e «pagina»
+# li rifà al minuto dopo. Lo si vede dagli inode: se il container ne vede altri, lo si riavvia
+# (al massimo MAX_INTERVENTI volte in un'ora).
+controlla_cartelle_pagina() {
+    local fuori dentro
+    [ "$(timeout 10 docker inspect --format '{{.State.Running}}' "$CONTENITORE_PAGINA" 2>/dev/null)" = true ] || return 0
+    fuori=$(stat -c %i "$FOTO" "$RICHIESTE" 2>/dev/null) || return 0
+    dentro=$(timeout 20 docker exec "$CONTENITORE_PAGINA" stat -c %i /foto /richieste 2>/dev/null) || return 0
+    fuori=${fuori//$'\n'/ } dentro=${dentro//$'\n'/ }
+    [ -n "$dentro" ] && [ "$dentro" != "$fuori" ] || return 0
+    if [ "$(interventi_recenti _cartelle)" -ge "$MAX_INTERVENTI" ]; then
+        segnala pagina "il container della pagina vede ancora cartelle vecchie di /dev/shm, ma l'ho già riavviato $MAX_INTERVENTI volte nell'ultima ora: serve un controllo a mano"
+        return 0
+    fi
+    registra_intervento _cartelle
+    esegui guardiano "la pagina vedeva cartelle vecchie di /dev/shm (rifatte dopo un'uscita dal Pi)" "" docker restart "$CONTENITORE_PAGINA"
+}
+
 pagina() {
     local fine
     mkdir -p "$DATI" "$PAUSA" "$FOTO" "$RICHIESTE" || exit 1
@@ -513,6 +535,7 @@ pagina() {
     fi
     fine=$(( $(date +%s) + DURATA_PAGINA ))
     fotografia
+    controlla_cartelle_pagina
     while :; do
         if esegui_richieste; then
             sleep 3                   # il tempo di ripartire, poi la fotografia nuova

@@ -14,6 +14,12 @@ case $1 in
         shift
         formato=""
         [ "$1" = --format ] && { formato=$2; shift 2; }
+        if [ "$formato" = '{{.State.Running}}' ]; then
+            # il container della pagina è acceso se c'è $SCENA/pagina-accesa
+            [ "$1" = guardiano-web-1 ] && [ -e "$SCENA/pagina-accesa" ] && { echo true; exit 0; }
+            echo "Error: No such object: $1" >&2
+            exit 1
+        fi
         for id in "$@"; do
             riga=$(grep -h "^$id|" "$SCENA"/*/contenitori)
             if [[ $formato == *"json .State"* ]]; then
@@ -30,6 +36,10 @@ case $1 in
         nome=${!#}
         echo "2026-11-07T10:00:00.000000000Z primo messaggio di $nome"
         printf '2026-11-07T10:00:01.000000000Z \033[31mrosso\033[0m <b>non html</b>\n' ;;
+    exec)
+        # "docker exec guardiano-web-1 stat -c %i /foto /richieste": gli inode che vede il container.
+        # Di solito le stesse cartelle del Pi; con $SCENA/inode-dentro, quelli scritti lì (cartelle vecchie)
+        if [ -f "$SCENA/inode-dentro" ]; then cat "$SCENA/inode-dentro"; else stat -c %i "$GUARDIANO_FOTO" "$GUARDIANO_RICHIESTE"; fi ;;
     restart)
         echo "restart $2" >> "$SCENA/chiamate"
         echo "$2" ;;
