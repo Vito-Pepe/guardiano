@@ -6,6 +6,8 @@
 #   ./guardiano.sh stato            riepilogo: container di ogni app, pause, ultimi interventi
 #   ./guardiano.sh pausa <app>      smette di controllare <app> (o "tutto") finché non la riprendi
 #   ./guardiano.sh riprendi <app>   torna a controllare <app> (o "tutto")
+#   ./guardiano.sh pagina           per la pagina web: fotografia ed esecuzione dei pulsanti (cron, ogni minuto)
+#   ./guardiano.sh fotografia       solo la fotografia (stato e log dei container) per la pagina web
 #
 # In un giro, per ogni cartella di app.conf (nell'ordine del file):
 #   - servizi del compose senza un container acceso (fermati, spariti, mai partiti)
@@ -17,6 +19,16 @@
 # Ogni app viene fatta ripartire al massimo MAX_INTERVENTI volte in un'ora: oltre la lascia stare
 # e lo scrive. Salta il giro mentre un update.sh (o un build/pull di compose) è in corso.
 # Nel registro (guardiano.log) scrive solo quando interviene o quando qualcosa cambia.
+#
+# La fotografia (per la pagina di stato in web/) si limita a leggere: stato dei container, ultime
+# righe dei loro log, pause, problemi e registro. La scrive in memoria (FOTO, non sulla scheda SD),
+# in una cartella nuova ogni volta; il file "attuale" dice qual è quella completa.
+#
+# I pulsanti della pagina (Riavvia, Ferma, Avvia) non toccano Docker: la pagina scrive una
+# richiesta in RICHIESTE e "pagina", che resta in ascolto per quasi tutto il minuto, la ricontrolla
+# da capo (app e container di app.conf, azione ammessa, limite orario), la esegue e scrive l'esito.
+# Ferma mette anche l'app in pausa (riga "pagina<TAB><container>" in pausa/<app>), così il giro non
+# la riaccende; Avvia toglie quella riga. Una pausa messa a mano ("mano") resta finché non la togli.
 #
 # Niente sudo, niente dipendenze: bash, coreutils, procps (pgrep, ps), flock e docker compose.
 
@@ -30,15 +42,27 @@ CASA=${GUARDIANO_CASA:-$QUI}             # dati/, pausa/ e guardiano.log: fuori 
 DATI=$CASA/dati
 PAUSA=$CASA/pausa
 REGISTRO=$CASA/guardiano.log
+FOTO=${GUARDIANO_FOTO:-/dev/shm/guardiano}   # in memoria: la legge il container della pagina
+RICHIESTE=${GUARDIANO_RICHIESTE:-/dev/shm/guardiano-richieste}   # in memoria: ci scrive la pagina
 
-MAX_INTERVENTI=3              # per app, nella finestra qui sotto
+MAX_INTERVENTI=3             # per app, nella finestra qui sotto
 FINESTRA=3600                 # secondi
 AGGIORNAMENTO_BLOCCATO=1800   # un update.sh in giro da più di così non ferma più i controlli
 REGISTRO_MAX=1000000          # byte: oltre, guardiano.log diventa guardiano.log.1
+FOTO_RIGHE_LOG=200            # righe di log per container nella fotografia
+FOTO_BYTE_LOG=200000          # e al massimo questi byte (righe lunghissime)
+MAX_AZIONI_PAGINA=30          # pulsanti della pagina in un'ora (FINESTRA): oltre li rifiuta
+SCADENZA_RICHIESTA=120        # s: una richiesta più vecchia non si esegue più (meglio rifarla)
+DURATA_PAGINA=${GUARDIANO_DURATA_PAGINA:-55}   # s di ascolto di "pagina": il cron la rilancia ogni minuto
+# Servono alla pagina stessa: da lì non si possono fermare (resterebbe chiusa fuori)
+PROTETTI="guardiano-web-1 ingressi-https-guardiano-1"
 PROVA=0
 
 # Una riga per container: servizio|oneoff|stato|salute|politica di riavvio|codice di uscita|nome
 FORMATO='{{index .Config.Labels "com.docker.compose.service"}}|{{index .Config.Labels "com.docker.compose.oneoff"}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}-{{end}}|{{.HostConfig.RestartPolicy.Name}}|{{.State.ExitCode}}|{{.Name}}'
+# Per la fotografia: nome|servizio|oneoff|politica|immagine|riavvii|.State in JSON (ultimo: può
+# contenere "|"). Niente .Config.Env né altro che possa contenere segreti.
+FOTO_FORMATO='{{.Name}}|{{index .Config.Labels "com.docker.compose.service"}}|{{index .Config.Labels "com.docker.compose.oneoff"}}|{{.HostConfig.RestartPolicy.Name}}|{{.Config.Image}}|{{.RestartCount}}|{{json .State}}'
 
 adesso() { date '+%Y-%m-%d %H:%M:%S'; }
 
@@ -90,10 +114,10 @@ leggi_elenco() {
     tr -d '\r' < "$ELENCO" | sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -v '^$'
 }
 
-# Legge un'app: SERVIZI (quelli del compose) e CONTENITORI (righe nel FORMATO qui sopra).
-# Se non ci riesce ritorna 1, con il motivo in ERRORE.
+# Legge un'app: SERVIZI (quelli del compose) e CONTENITORI (righe nel FORMATO qui sopra, o in
+# quello dato come secondo argomento). Se non ci riesce ritorna 1, con il motivo in ERRORE.
 esamina() {
-    local cartella=$BASE/$1 trovato=0 f servizi ids righe
+    local cartella=$BASE/$1 formato=${2:-$FORMATO} trovato=0 f servizi ids righe
     SERVIZI=() CONTENITORI=() ERRORE=""
     if [ ! -d "$cartella" ]; then ERRORE="manca la cartella $cartella"; return 1; fi
     for f in compose.yaml compose.yml docker-compose.yaml docker-compose.yml; do
@@ -114,7 +138,7 @@ esamina() {
     if [ -n "$ids" ]; then
         # Un container sparito tra ps e inspect fa fallire inspect, ma gli altri li stampa lo stesso
         # shellcheck disable=SC2086
-        righe=$(timeout 60 docker inspect --format "$FORMATO" $ids 2>/dev/null)
+        righe=$(timeout 60 docker inspect --format "$formato" $ids 2>/dev/null)
         if [ -z "$righe" ]; then ERRORE="docker inspect non risponde"; return 1; fi
         mapfile -t CONTENITORI <<< "$righe"
     fi
@@ -139,7 +163,13 @@ controlla_app() {
     local voce=$1 app riga servizio oneoff stato salute politica uscita nome cosa n
     app=$(basename "$voce")
     if [ -e "$PAUSA/$app" ]; then
-        segnala "$app" "in pausa, non la controllo (per ricominciare: ./guardiano.sh riprendi $app)"
+        local fermati
+        fermati=$(grep '^pagina	' "$PAUSA/$app" 2>/dev/null | cut -f2 | tr '\n' ' ')
+        if [ -n "$fermati" ]; then
+            segnala "$app" "in pausa, non la controllo: dalla pagina hai fermato ${fermati% } (per ricominciare: Avvia nella pagina, o ./guardiano.sh riprendi $app)"
+        else
+            segnala "$app" "in pausa, non la controllo (per ricominciare: ./guardiano.sh riprendi $app)"
+        fi
         return
     fi
     if ! esamina "$voce"; then segnala "$app" "$ERRORE"; return; fi
@@ -286,6 +316,213 @@ giro() {
     fine_giro "completo"
 }
 
+# Una app nella fotografia: app/<nome>/info (chiave<TAB>valore), servizi, contenitori
+# (righe nel FOTO_FORMATO) e log/<container> con le ultime righe di ognuno.
+fotografa_app() {   # voce di app.conf, cartella della fotografia
+    local voce=$1 dest app nome n riga
+    app=$(basename "$voce")
+    dest=$2/app/$app
+    mkdir -p "$dest"
+    n=$(PROVA=1 interventi_recenti "$app")
+    {
+        printf 'cartella\t%s\n' "$voce"
+        printf 'interventi\t%s\n' "$n"
+        if [ -e "$PAUSA/$app" ]; then
+            printf 'pausa\t1\n'
+            # Container fermati dalla pagina (il resto della pausa è messo a mano)
+            printf 'fermati\t%s\n' "$(grep '^pagina	' "$PAUSA/$app" | cut -f2 | tr '\n' ' ')"
+        fi
+    } > "$dest/info"
+    if ! esamina "$voce" "$FOTO_FORMATO"; then
+        printf 'errore\t%s\n' "$ERRORE" >> "$dest/info"
+        return
+    fi
+    printf '%s\n' "${SERVIZI[@]}" > "$dest/servizi"
+    [ ${#CONTENITORI[@]} -gt 0 ] || return 0
+    printf '%s\n' "${CONTENITORI[@]}" > "$dest/contenitori"
+    for riga in "${CONTENITORI[@]}"; do
+        nome=${riga%%|*}
+        nome=${nome#/}
+        case $nome in ''|*[!A-Za-z0-9_.-]*) continue ;; esac
+        timeout 20 docker logs --tail "$FOTO_RIGHE_LOG" --timestamps "$nome" 2>&1 | tail -c "$FOTO_BYTE_LOG" > "$2/log/$nome"
+    done
+}
+
+fotografia() {
+    local voce nuova precedente f
+    mkdir -p "$FOTO" "$DATI" "$PAUSA" || return 1
+    if command -v flock >/dev/null 2>&1; then
+        exec 8> "$DATI/.blocco-foto"
+        flock -n 8 || return 0        # la fotografia di prima non è ancora finita
+    fi
+    nuova=foto-$(date +%s)-$$
+    mkdir -p "$FOTO/$nuova/app" "$FOTO/$nuova/log"
+    date +%s > "$FOTO/$nuova/ora"
+    printf '%s\n' $PROTETTI > "$FOTO/$nuova/protetti"
+    [ -f "$DATI/ultimo-giro" ] && cp "$DATI/ultimo-giro" "$FOTO/$nuova/giro"
+    ls -A "$PAUSA" > "$FOTO/$nuova/pause" 2>/dev/null
+    [ -f "$REGISTRO" ] && tail -n 300 "$REGISTRO" > "$FOTO/$nuova/registro"
+    # Problemi ancora aperti (anche quelli generali: docker, aggiornamento, progetti, pausa)
+    for f in "$DATI"/*.problema; do
+        [ -f "$f" ] && printf '%s\t%s\n' "$(basename "$f" .problema)" "$(head -n 1 "$f")"
+    done > "$FOTO/$nuova/problemi"
+    for voce in "${VOCI[@]}"; do basename "$voce"; done > "$FOTO/$nuova/elenco"
+    if timeout 30 docker info > /dev/null 2>&1; then
+        echo ok > "$FOTO/$nuova/docker"
+        for voce in "${VOCI[@]}"; do fotografa_app "$voce" "$FOTO/$nuova"; done
+    else
+        echo giu > "$FOTO/$nuova/docker"
+    fi
+    # Cambio in un colpo solo: chi legge trova sempre una fotografia completa
+    precedente=$(cat "$FOTO/attuale" 2>/dev/null)
+    echo "$nuova" > "$FOTO/attuale.nuovo"
+    mv -f "$FOTO/attuale.nuovo" "$FOTO/attuale"
+    # Tiene la nuova e quella di prima (chi la sta ancora leggendo la trova), toglie le altre
+    for f in "$FOTO"/foto-*; do
+        [ -d "$f" ] || continue
+        case $(basename "$f") in "$nuova"|"$precedente") ;; *) rm -rf "$f" ;; esac
+    done
+}
+
+# Pausa messa dalla pagina per un container: "aggiungi" quando lo ferma, "togli" quando lo avvia.
+# Una pausa a mano (riga "mano", o file vuoto delle versioni di prima) resta com'è.
+pausa_da_pagina() {   # app, container, aggiungi|togli
+    local file=$PAUSA/$1 riga="pagina	$2" resto
+    mkdir -p "$PAUSA"
+    if [ "$3" = aggiungi ]; then
+        if [ -f "$file" ] && [ ! -s "$file" ]; then printf 'mano\n' > "$file"; fi
+        grep -qxF "$riga" "$file" 2>/dev/null || printf '%s\n' "$riga" >> "$file"
+    elif [ -f "$file" ]; then
+        resto=$(grep -vxF "$riga" "$file" | grep -v '^[[:space:]]*$')
+        if [ -n "$resto" ]; then printf '%s\n' "$resto" > "$file"; else rm -f "$file"; fi
+    fi
+}
+
+# Nella cartella delle richieste scrive anche il container: mai scrivere su un nome che potrebbe
+# aver preparato lui (un link verso ~/.ssh/authorized_keys, per dire). mktemp crea un file nuovo
+# (O_EXCL, non segue link) e mv sostituisce il nome senza seguire niente.
+esito_richiesta() {   # id, esito (fatto|fallito|rifiutata|scaduta), messaggio
+    local tmp
+    tmp=$(mktemp "$RICHIESTE/.esito.XXXXXXXX") || return 1
+    printf 'esito\t%s\nmessaggio\t%s\n' "$2" "$3" > "$tmp" && chmod 644 "$tmp" && mv -f "$tmp" "$RICHIESTE/$1.esito"
+}
+
+# Una richiesta della pagina, già presa (<id>.presa). Il contenuto viene da un container: si
+# ricontrolla tutto. Ritorna 0 se ha toccato un container.
+esegui_richiesta() {
+    local id=$1 k v azione="" app="" bersaglio="" quando="" voce="" x riga serv nome trovato="" servizio=""
+    local n risultato codice messaggio
+    # Poche righe, pochi byte, pochi secondi: anche se al posto del file ci fosse altro
+    while IFS=$'\t' read -r k v; do
+        case $k in
+            azione) azione=$v ;; app) app=$v ;; bersaglio) bersaglio=$v ;; quando) quando=$v ;;
+        esac
+    done < <(timeout 5 head -c 2000 "$RICHIESTE/$id.presa" 2>/dev/null | head -n 10 | tr -d '\r')
+
+    case $azione in riavvia|ferma|avvia) ;; *) esito_richiesta "$id" rifiutata "azione sconosciuta"; return 1 ;; esac
+    if [[ ! $bersaglio =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+        esito_richiesta "$id" rifiutata "nome del container non valido"; return 1
+    fi
+    if [[ ! $quando =~ ^[0-9]{1,12}$ ]] || [ $(( $(date +%s) - quando )) -gt "$SCADENZA_RICHIESTA" ]; then
+        esito_richiesta "$id" scaduta "il guardiano non l'ha presa in tempo: riprova"; return 1
+    fi
+    for x in "${VOCI[@]}"; do [ "$(basename "$x")" = "$app" ] && voce=$x; done
+    if [ -z "$voce" ]; then esito_richiesta "$id" rifiutata "app sconosciuta"; return 1; fi
+    if ! esamina "$voce"; then esito_richiesta "$id" fallito "$ERRORE"; return 1; fi
+    # Il bersaglio dev'essere un container di quell'app o, solo per Avvia, uno dei suoi servizi
+    for riga in "${CONTENITORI[@]}"; do
+        IFS='|' read -r serv _ _ _ _ _ nome <<< "$riga"
+        if [ "${nome#/}" = "$bersaglio" ]; then trovato=contenitore; servizio=$serv; fi
+    done
+    if [ -z "$trovato" ] && [ "$azione" = avvia ]; then
+        for x in "${SERVIZI[@]}"; do [ "$x" = "$bersaglio" ] && { trovato=servizio; servizio=$x; }; done
+    fi
+    if [ -z "$trovato" ]; then esito_richiesta "$id" rifiutata "$bersaglio non è un container di $app"; return 1; fi
+    if [ "$azione" = ferma ] && [[ " $PROTETTI " == *" $bersaglio "* ]]; then
+        esito_richiesta "$id" rifiutata "$bersaglio serve alla pagina stessa: da qui non si ferma"; return 1
+    fi
+    n=$(interventi_recenti _pagina)
+    if [ "$n" -ge "$MAX_AZIONI_PAGINA" ]; then
+        esito_richiesta "$id" rifiutata "già $n azioni dalla pagina nell'ultima ora: riprova più tardi"; return 1
+    fi
+    registra_intervento _pagina
+
+    case $azione in
+        riavvia)
+            risultato=$(timeout 120 docker restart "$bersaglio" 2>&1) ;;
+        ferma)
+            # Prima la pausa, così un giro che parte adesso non lo riaccende
+            pausa_da_pagina "$app" "$bersaglio" aggiungi
+            risultato=$(timeout 120 docker stop "$bersaglio" 2>&1) ;;
+        avvia)
+            risultato=$(cd "$BASE/$voce" && timeout 900 docker compose up -d "$servizio" 2>&1) ;;
+    esac
+    codice=$?
+
+    if [ "$codice" = 0 ]; then
+        case $azione in
+            riavvia) messaggio="riavviato" ;;
+            ferma)   messaggio="fermato: il guardiano non lo riaccende finché non lo avvii da qui" ;;
+            avvia)
+                pausa_da_pagina "$app" "$bersaglio" togli
+                messaggio="avviato"
+                [ -e "$PAUSA/$app" ] && messaggio="avviato, ma $app resta in pausa (altri container fermati da qui, o pausa messa a mano)" ;;
+        esac
+        esito_richiesta "$id" fatto "$messaggio"
+        scrivi "$app: dalla pagina: $azione $bersaglio: fatto"
+    else
+        # Non si è fermato: il guardiano deve continuare a controllarlo
+        [ "$azione" = ferma ] && pausa_da_pagina "$app" "$bersaglio" togli
+        risultato=$(printf '%s' "$risultato" | tail -n 3 | tr '\n' ' ')
+        esito_richiesta "$id" fallito "codice $codice: $risultato"
+        scrivi "$app: dalla pagina: $azione $bersaglio: NON riuscito (codice $codice): $risultato"
+    fi
+    return 0
+}
+
+# Esegue le richieste in attesa. Ritorna 0 se ha toccato almeno un container.
+esegui_richieste() {
+    local f id fatto=1
+    [ -d "$RICHIESTE" ] || return 1
+    for f in "$RICHIESTE"/*.richiesta; do
+        [ -e "$f" ] || [ -L "$f" ] || continue
+        # Solo file veri: niente link, fifo o cartelle
+        if [ ! -f "$f" ] || [ -L "$f" ]; then rm -f "$f" 2>/dev/null; continue; fi
+        id=$(basename "$f" .richiesta)
+        if [[ ! $id =~ ^[0-9]{10,13}-[0-9a-f]{8}$ ]]; then rm -f "$f"; continue; fi
+        mv -f "$f" "$RICHIESTE/$id.presa" 2>/dev/null || continue
+        esegui_richiesta "$id" && fatto=0
+        rm -f "$RICHIESTE/$id.presa"
+    done
+    # La pagina legge l'esito subito: dopo dieci minuti non serve più (né un file a metà)
+    find "$RICHIESTE" -maxdepth 1 \( -name '*.esito' -o -name '*.tmp' -o -name '.esito.*' \) -mmin +10 -exec rm -f {} + 2>/dev/null
+    return $fatto
+}
+
+# Dal cron ogni minuto: una fotografia, poi in ascolto dei pulsanti per DURATA_PAGINA secondi.
+# Dopo un'azione, una fotografia nuova, così la pagina mostra subito com'è andata.
+pagina() {
+    local fine
+    mkdir -p "$DATI" "$PAUSA" "$FOTO" "$RICHIESTE" || exit 1
+    # Ci scrive il container della pagina (utente node): chiunque sul Pi può lasciare una richiesta,
+    # ma ogni richiesta viene ricontrollata qui
+    chmod 777 "$RICHIESTE" 2>/dev/null
+    if command -v flock >/dev/null 2>&1; then
+        exec 7> "$DATI/.blocco-pagina"
+        flock -n 7 || exit 0          # quella del minuto prima non ha ancora finito
+    fi
+    fine=$(( $(date +%s) + DURATA_PAGINA ))
+    fotografia
+    while :; do
+        if esegui_richieste; then
+            sleep 3                   # il tempo di ripartire, poi la fotografia nuova
+            fotografia
+        fi
+        [ "$(date +%s)" -lt "$fine" ] || break
+        sleep 2
+    done
+}
+
 descrivi() {   # stato, salute, codice di uscita → a parole
     local d
     case $1 in
@@ -351,7 +588,7 @@ cambia_pausa() {   # pausa|riprendi, app o "tutto"
     fi
     mkdir -p "$PAUSA"
     if [ "$azione" = pausa ]; then
-        touch "$PAUSA/$app"
+        grep -qx mano "$PAUSA/$app" 2>/dev/null || printf 'mano\n' >> "$PAUSA/$app"
         echo "Fatto: il guardiano non tocca più $app finché non lanci ./guardiano.sh riprendi $app"
     else
         rm -f "$PAUSA/$app"
@@ -367,6 +604,9 @@ case ${1:-giro} in
     prova)          PROVA=1; giro ;;
     stato)          mostra_stato ;;
     pausa|riprendi) cambia_pausa "$1" "${2:-}" ;;
-    aiuto|-h|--help) sed -n '4,8p' "$0" | sed 's/^# \{0,1\}//' ;;
-    *)              echo "Comando sconosciuto: $1"; sed -n '4,8p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    pagina)         pagina ;;
+    fotografia)     fotografia ;;
+    richieste)      mkdir -p "$DATI" "$PAUSA"; esegui_richieste; exit 0 ;;   # una volta sola (prove)
+    aiuto|-h|--help) sed -n '4,10p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *)              echo "Comando sconosciuto: $1"; sed -n '4,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

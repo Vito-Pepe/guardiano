@@ -23,10 +23,11 @@ https://raw.githubusercontent.com/Vito-Pepe/sillabe/main/INFRASTRUTTURA-PI.md
 
 ## Cos'è
 
-`guardiano.sh` tiene accese le app Docker del Pi: il cron lo lancia ogni 5 minuti (minuti 2, 7, 12…), e per ogni cartella di `app.conf` avvia con `docker compose up -d` i servizi fermi o spariti e fa `docker restart` dei container `unhealthy`. Al massimo 3 interventi in un'ora per app, salta il giro durante gli `update.sh`, scrive in `guardiano.log` solo quando succede qualcosa. Comandi `stato`, `prova`, `pausa <app>`, `riprendi <app>`: vedi `README.md`.
+`guardiano.sh` tiene accese le app Docker del Pi: il cron lo lancia ogni 5 minuti (minuti 2, 7, 12…), e per ogni cartella di `app.conf` avvia con `docker compose up -d` i servizi fermi o spariti e fa `docker restart` dei container `unhealthy`. Al massimo 3 interventi in un'ora per app, salta il giro durante gli `update.sh`, scrive in `guardiano.log` solo quando succede qualcosa. Comandi `stato`, `prova`, `pausa <app>`, `riprendi <app>`, `pagina`, `fotografia`: vedi `README.md`.
 
-- Gira sull'host come utente `pepe`, **senza `sudo`**, dal cron: niente container, porte o rete. `update.sh` fa solo `git pull` (il guardiano non ha immagini da ricostruire).
-- Dati fuori da git nella sua cartella: `dati/` (problemi già segnalati, interventi recenti, ultimo giro), `pausa/`, `guardiano.log`.
+- Lo script gira sull'host come utente `pepe`, **senza `sudo`**, dal cron.
+- La **pagina di stato** (`web/`, container `guardiano-web-1`, `127.0.0.1:8093`, `https://guardiano.<tailnet>.ts.net` dalla repo `ingressi-https`) **non ha accesso a Docker**: legge in sola lettura la fotografia che `guardiano.sh pagina` scrive ogni minuto in `/dev/shm/guardiano`, e i suoi pulsanti (Riavvia, Ferma, Avvia) lasciano richieste in `/dev/shm/guardiano-richieste`, che `guardiano.sh pagina` ricontrolla ed esegue. Formato della fotografia: in testa a `web/foto.js`. `update.sh` fa `git pull` e ricostruisce la pagina.
+- Dati fuori da git nella sua cartella: `dati/` (problemi già segnalati, interventi recenti, azioni della pagina, ultimo giro), `pausa/` (una riga `mano` per la pausa a mano, `pagina<TAB><container>` per ogni container fermato dalla pagina), `guardiano.log`.
 
 ## Vincoli tecnici (non romperli)
 
@@ -35,8 +36,14 @@ https://raw.githubusercontent.com/Vito-Pepe/sillabe/main/INFRASTRUTTURA-PI.md
 - Ogni comando verso Docker passa da `timeout`: un Docker bloccato non deve bloccare il cron.
 - Quando sul Pi si aggiunge o si toglie un'app, va aggiunta o tolta in `app.conf` (e in `INFRASTRUTTURA-PI.md`).
 - A capo LF (`.gitattributes`) e `guardiano.sh`, `update.sh`, `test/test.sh` e `test/finti/*` eseguibili: da Windows aggiungerli con `git add --chmod=+x`.
+- **Mai `docker.sock` (né altro accesso a Docker) nel container della pagina**: chi comanda Docker comanda il Pi come root. La pagina chiede, `guardiano.sh` decide: ogni richiesta (`esegui_richiesta`) va ricontrollata lì da capo, perché il suo contenuto viene da un container. Le azioni restano tre (riavvia, ferma, avvia), mai comandi arbitrari, mai `rm`/`down`.
+- Nella fotografia niente che possa contenere segreti: niente `.Config.Env` né `docker inspect` completo (vedi `FOTO_FORMATO`).
+- `web/`: Node senza dipendenze, CSP rigida (niente stili o script in linea, niente `innerHTML`: il DOM si fa con `createElement`/`textContent`, i log possono contenere di tutto), le scritture solo con JSON e dalla stessa origine, come LogoApp. Colori solo dalle variabili di `:root` in `web/www/pannello.css` (chiaro e scuro). File statici con nomi propri (`pannello.css`, `pannello.js`).
+- La pagina deve funzionare a 375 px (telefono), su iPad e su PC.
 
 ## Prove
 
-- `bash test/test.sh` dopo ogni modifica a `guardiano.sh`: prova lo script con il `docker` finto di `test/finti/` (scena per app in `$SCENA`, interventi annotati in `$SCENA/chiamate`). Un comportamento nuovo vuole un caso nuovo nel test.
+- `bash test/test.sh` dopo ogni modifica a `guardiano.sh`: prova lo script con il `docker` finto di `test/finti/` (scena per app in `$SCENA`, interventi annotati in `$SCENA/chiamate`), compresi fotografia e pulsanti. Un comportamento nuovo vuole un caso nuovo nel test.
+- `node test/test-web.js` dopo ogni modifica a `web/`: server, API, intestazioni, pulsanti, con la fotografia d'esempio di `test/foto-esempio.js`.
+- Anteprima della pagina: `node test/anteprima.js` (`.claude/launch.json`, porta 8093), con dati d'esempio e un finto guardiano che risponde ai pulsanti.
 - Sul Pi, prima di fidarsi di una modifica: `./guardiano.sh prova` dice cosa farebbe senza toccare niente.
